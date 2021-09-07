@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+
+
+class Worker:
+    def __init__(self, s, q):
+        self.s = s
+        self.q = q
+        self.d = {}
+
+    def runq(self):
+        try:
+            self.runqx()
+        except:
+            os.abort()
+
+    def runqx(self):
+        l = []
+        c = []
+
+        while True:
+            for ch in self.s.recv(10000):
+                if ch == 10:
+                    c.append(json.loads(bytes(l).decode()))
+                    l = []
+                else:
+                    l.append(ch)
+
+            if c:
+                self.q.put(functools.partial(self.commands, c))
+                c = []
+
+    def commands(self, c):
+        for v in c:
+            self.d[(v['x'], v['y'])] = attrs_from_dict(v['a'])
+
+    def pixels(self, attrs):
+        for (x, y), a in self.d.items():
+            yield x, y, a
+
+    def dispatch(self, ev):
+        self.s.send((json.dumps({'e': ev}) + '\n').encode())
+
+        return True
+
+
+class Server:
+    def __init__(self, q):
+        self.q = q
+        self.s = socket.socket(socket.AF_UNIX)
+        self.s.bind('/Users/pg83/display')
+        self.s.listen()
+        self.w = []
+
+        threading.Thread(target=self.acceptor, daemon=True).start()
+
+    def acceptor(self):
+        while True:
+            self.q.put(functools.partial(self.new_conn, self.s.accept()[0]))
+
+    def new_conn(self, s):
+        w = Worker(s, self.q)
+
+        self.w.append(w)
+
+        threading.Thread(target=w.runq, daemon=True).start()
+
+    def pixels(self, attrs):
+        return itt.chain.from_iterable(w.pixels(attrs) for w in self.w)
+
+    def dispatch(self, ev):
+        if ev == 'ctrl-c':
+            raise KeyboardInterrupt()
+
+        return any(w.dispatch(ev) for w in reversed(self.w))
+
+
+def run_server():
+    with terminal_channel() as ch:
+        s = Server(ch.q)
+        d = Display(ch)
+        i = InputStream(ch)
+        p = PubSub()
+
+        event_loop(d, i, s, p)
+
+
+class Client:
+    def __init__(self):
+        self.s = socket.socket(socket.AF_UNIX)
+        self.s.connect('/Users/pg83/display')
+
+    def title(self, t):
+        pass
+
+    def display(self):
+        return self
+
+    def input_stream(self):
+        return self
+
+    @property
+    def dx(self):
+        return 50
+
+    @property
+    def dy(self):
+        return 20
+
+    def fini(self):
+        self.s.close()
+
+    def flip(self, pixels):
+        s = {}
+
+        for x, y, a in pixels:
+            k = (x, y)
+
+            if k in s:
+                s[k] = a.combine(s[k])
+            else:
+                s[k] = a
+
+        d = ''
+
+        for k in s:
+            x, y = k
+            a = s[k]
+
+            d += json.dumps({'x': x, 'y': y, 'a': a.as_dict()})
+            d += '\n'
+
+        if d:
+            self.s.send(d.encode())
+
+    def next_bulk(self, n):
+        l = []
+
+        while True:
+            for n in self.s.recv(1):
+                if n == 10:
+                    return [json.loads(bytes(l).decode())['e']]
+
+                l.append(n)
+
+
+@contextlib.contextmanager
+def tui_channel():
+    c = Client()
+
+    try:
+        yield c
+    finally:
+        c.fini()
+
+
+def run_client(path):
+    main(path, tui_channel)
+
+
+if __name__ == '__main__':
+    try:
+        if sys.argv[1] == 'server':
+            run_server()
+        elif sys.argv[1] == 'client':
+            run_client(sys.argv[2])
+    except KeyboardInterrupt:
+        pass

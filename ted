@@ -1,0 +1,2262 @@
+#!/usr/bin/env python3
+
+import re
+import io
+import os
+import sys
+import json
+import time
+import math
+import queue
+import bisect
+import string
+import signal
+import sqlite3
+import hashlib
+import cProfile
+import fractions
+import threading
+import functools
+import contextlib
+
+import itertools as itt
+
+from collections import deque, defaultdict
+
+import pygments.util as pu
+import pygments.token as pt
+import pygments.lexers as pl
+import pygments.styles as ps
+
+
+PROFILE = os.environ.get('PROFILE', '')
+
+
+def str_hash(s):
+    return hashlib.md5(s.encode()).hexdigest()
+
+
+def struct_hash(s):
+    return str_hash(json.dumps(s, sort_keys=True))
+
+
+class PubSub:
+    def __init__(self):
+        self.s = defaultdict(list)
+
+    def sub(self, t, f):
+        self.s[t].append(f)
+
+        return self
+
+    def pub(self, t, *args, **kwargs):
+        for f in self.s.get(t, []):
+            f(*args, **kwargs)
+
+    def msg(self, m):
+        self.pub('message', m)
+
+
+def esc(d):
+    return chr(27) + d
+
+
+def csi(*args):
+    res = '[' + str(args[0])
+
+    for a in args[1:]:
+        res += ';'
+        res += str(a)
+
+    return esc(res)
+
+
+def csim(*args):
+    return csi(*args) + 'm'
+
+
+def title(t):
+    return chr(27) + ']0;' + t + chr(7)
+
+
+def move(x, y):
+    return csi(y + 1, x + 1) + 'H'
+
+
+def retval(v):
+    def func():
+        return v
+
+    return func
+
+
+class SigWinch(Exception):
+    pass
+
+
+class Interrupt(Exception):
+    pass
+
+
+class Channel:
+    def __init__(self):
+        self.b = deque()
+        self.i = io.FileIO(0, 'r')
+        self.o = io.FileIO(1, 'w')
+        self.q = queue.SimpleQueue()
+        self.l = threading.Lock()
+
+        os.system('stty -echo raw')
+        self.send(csi('?25l') + csi('?9h') + csi('?1000h') + csi('?1002h') + csi('?1006h'))
+        threading.Thread(target=self.runq, daemon=True).start()
+        signal.signal(signal.SIGWINCH, self.sigwinch)
+
+    def fini(self):
+        os.system('tput reset')
+        os.system('stty -raw')
+
+    def title(self, t):
+        self.send(title(t))
+
+    def sigwinch(self, *args):
+        def err():
+            if self.l.locked():
+                return
+
+            raise SigWinch()
+
+        self.q.put(err)
+
+    def runq(self):
+        try:
+            while True:
+                for c in self.i.read(128):
+                    self.q.put(retval(c))
+        except Exception as e:
+            def err():
+                raise e
+
+            self.q.put(err)
+
+    def send(self, cmd):
+        self.o.write(cmd.encode())
+
+    def recv(self):
+        res = self.q.get()()
+
+        if res is not None:
+            return res
+
+        raise Interrupt()
+
+    def recv_nowait(self):
+        while True:
+            res = self.q.get_nowait()()
+
+            if res is not None:
+                return res
+
+    def next_from(self, f):
+        try:
+            return self.b.popleft()
+        except IndexError:
+            pass
+
+        return f()
+
+    def next(self):
+        return self.next_from(self.recv)
+
+    def next_nowait(self):
+        return self.next_from(self.recv_nowait)
+
+    def read_seq(self, ch):
+        while True:
+            s = self.recv()
+
+            if s == 27:
+                return self.read_to(ch)[1:]
+
+            self.b.append(s)
+
+    def read_to(self, ch):
+        res = []
+
+        while True:
+            s = self.recv()
+
+            if s == ch:
+                return res
+
+            res.append(s)
+
+    def resp(self, ch):
+        return ''.join(chr(x) for x in self.read_seq(ord(ch)))
+
+    def dims(self):
+        with self.l:
+            return self.dims_nointr()
+
+    def dims_nointr(self):
+        n = 16
+
+        while True:
+            x, y = self.try_dims(n)
+
+            if x < n and y < n:
+                return x, y
+
+            n *= 2
+
+    def try_dims(self, n):
+        while True:
+            self.send(move(n, n) + csi('6n'))
+
+            y, x = self.resp('R').split(';')
+
+            try:
+                return int(x), int(y)
+            except ValueError:
+                pass
+
+
+KMAP = [
+    ('[<', 'sgr'),
+    ('[A', 'up'),
+    ('[B', 'down'),
+    ('[C', 'right'),
+    ('[D', 'left'),
+    ('[F', 'end'),
+    ('[H', 'home'),
+    ('[1~', 'home'),
+    ('[2~', 'insert'),
+    ('[3~', 'delete'),
+    ('[4~', 'end'),
+    ('[5~', 'pageup'),
+    ('[6~', 'pagedown'),
+    ('[7~', 'home'),
+    ('[8~', 'end'),
+    ('OP', 'f1'),
+    ('OQ', 'f2'),
+    ('OR', 'f3'),
+    ('OS', 'f4'),
+    ('[P', 'f1'),
+    ('[Q', 'f2'),
+    ('[R', 'f3'),
+    ('[S', 'f4'),
+    ('[15~', 'f5'),
+    ('[17~', 'f6'),
+    ('[18~', 'f7'),
+    ('[19~', 'f8'),
+    ('[20~', 'f9'),
+    ('[21~', 'f10'),
+    ('[23~', 'f11'),
+    ('[24~', 'f12'),
+] + [(x, f'alt-{x}') for x in (string.ascii_lowercase + string.digits)]
+
+
+def make_scan_trie():
+    res = {}
+
+    def substr(k):
+        s = ''
+
+        for c in k:
+            s += c
+
+            yield s
+
+    for k, v in KMAP:
+        for sk in substr(k):
+            res[sk] = 'int'
+
+        res[k] = v
+
+    return res
+
+
+class BadInput(Exception):
+    pass
+
+
+class InputStream:
+    TRIE = make_scan_trie()
+
+    ASCII = dict(
+        [(n + 1, f'ctrl-{ch}') for n, ch in enumerate(string.ascii_lowercase)] + [
+            (0,   'ctrl-space'),
+            (8,   'bs'),
+            (9,   'tab'),
+            (10,  'lf'),
+            (13,  'cr'),
+            (127, 'bs'),
+        ]
+    )
+
+    BROKEN_UNICODE = dict((bytes(k).decode(), v) for k, v in (
+        ((226, 136, 145), 'alt-w'),
+        ((197, 147),      'alt-q'),
+        ((194, 174),      'alt-r'),
+        ((226, 137, 136), 'alt-x'),
+        ((226, 128, 160), 'alt-t'),
+    ))
+
+    def __init__(self, ch):
+        self.ch = ch
+
+    def next(self):
+        return self.scan_event(self.ch.next())
+
+    def next_nowait(self):
+        return self.scan_event(self.ch.next_nowait())
+
+    def iter_next(self):
+        yield self.next()
+
+        try:
+            while True:
+                yield self.next_nowait()
+        except queue.Empty:
+            pass
+
+    def next_bulk(self, n):
+        return list(itt.islice(self.iter_next(), n))
+
+    def scan_event(self, key):
+        if key < 128:
+            if key == 27:
+                res = self.scan_escape()
+
+                if res == 'sgr':
+                    return self.scan_sgr()
+
+                return {'t': 'k', 'v': res}
+
+            val = self.ASCII.get(key)
+
+            if val:
+                return {'t': 'k', 'v': val}
+
+            if key >= 32:
+                return {'t': 'c', 'v': chr(key)}
+
+            raise BadInput(str(key))
+
+        res = self.scan_utf8(key)
+        res = self.BROKEN_UNICODE.get(res, res)
+
+        if len(res) > 1:
+            return {'t': 'k', 'v': res}
+
+        return {'t': 'c', 'v': res}
+
+    def scan_sgr(self):
+        r = ''
+
+        while True:
+            ch = chr(self.ch.next())
+
+            if ch in ('M', 'm'):
+                return self.parse_sgr(r, ch)
+
+            r += ch
+
+    def parse_sgr(self, v, k):
+        p, x, y = v.split(';')
+
+        ev = {
+            'press': (k == 'M'),
+            'x': int(x) - 1,
+            'y': int(y) - 1,
+        }
+
+        return {'t': 'm', 'v': ev}
+
+    def scan_utf8(self, key):
+        runes = [key]
+
+        for i in range(0, 4):
+            runes.append(self.ch.next())
+
+            try:
+                return bytes(runes).decode()
+            except UnicodeError:
+                pass
+
+    def scan_escape(self):
+        p = ''
+
+        while True:
+            p += chr(self.ch.next())
+
+            v = self.TRIE.get(p)
+
+            if v:
+                if v != 'int':
+                    return v
+            else:
+                raise BadInput(p)
+
+
+class Color24:
+    __slots__ = 't'
+
+    def __init__(self, r, g, b):
+        self.t = (r, g, b)
+
+    def bg(self):
+        return csim(48, 2, *self.t)
+
+    def fg(self):
+        return csim(38, 2, *self.t)
+
+    def as_dict(self):
+        return {'t': '2', 'v': self.t}
+
+    def rgb(self):
+        return self.t
+
+
+TBL8BG = [csim(48, 5, n) for n in range(0, 256)]
+TBL8FG = [csim(38, 5, n) for n in range(0, 256)]
+
+
+def iter_4():
+    yield 0, 0, 0
+    yield 170, 0, 0
+    yield 0, 170, 0
+    yield 170, 85, 0
+    yield 0, 0, 170
+    yield 170, 0, 170
+    yield 0, 170, 170
+    yield 170, 170, 170
+    yield 85, 85, 85
+    yield 255, 85, 85
+    yield 85, 255, 85
+    yield 255, 255, 85
+    yield 85, 85, 255
+    yield 255, 85, 255
+    yield 85, 255, 255
+    yield 255, 255, 255
+
+
+def iter_8():
+    yield from iter_4()
+
+    scale = 255.0 / 5.0
+
+    for r in range(0, 6):
+        for g in range(0, 6):
+            for b in range(0, 6):
+                yield int(r * scale), int(g * scale), int(b * scale)
+
+    scale = 255.0 / 23.0
+
+    for i in range(0, 24):
+        x = int(i * scale)
+
+        yield x, x, x
+
+
+RGB8 = list(iter_8())
+
+
+class Color8:
+    __slots__ = 'n'
+
+    def __init__(self, n):
+        self.n = n
+
+    def bg(self):
+        return TBL8BG[self.n]
+
+    def fg(self):
+        return TBL8FG[self.n]
+
+    def as_dict(self):
+        return {'t': '8', 'n': self.n}
+
+    def rgb(self):
+        return RGB8[self.n]
+
+
+TBL4BG = [csim(40 + n if n < 8 else 92 + n) for n in range(0, 16)]
+TBL4FG = [csim(30 + n if n < 8 else 82 + n) for n in range(0, 16)]
+
+
+
+class Color4:
+    __slots__ = 'n'
+
+    def __init__(self, n):
+        self.n = n
+
+    def bg(self):
+        return TBL4BG[self.n]
+
+    def fg(self):
+        return TBL4FG[self.n]
+
+    def as_dict(self):
+        return {'t': '4', 'n': self.n}
+
+    def rgb(self):
+        return RGB8[self.n]
+
+
+class DefaultColor:
+    def fg(self):
+        return csim(39)
+
+    def bg(self):
+        return csim(49)
+
+    def as_dict(self):
+        return {'t': 'd'}
+
+    def rgb(self):
+        return (0, 0, 0)
+
+
+def black():
+    return Color4(0)
+
+
+def white():
+    return Color4(15)
+
+
+def gray8(n):
+    return Color8(232 + n)
+
+
+def gray24(n):
+    return Color24(n, n, n)
+
+
+class Attrs:
+    __slots__ = 't'
+
+    def __init__(self, c=None, b=None, f=None):
+        self.t = (c, b, f)
+
+    def fmt(self):
+        c, b, f = self.t
+
+        return b.bg() + f.fg() + c
+
+    def combine(self, prev):
+        c1, b1, f1 = prev.t
+        c2, b2, f2 = self.t
+
+        return Attrs(c=c2 or c1, b=b2 or b1, f=f2 or f1)
+
+    def as_dict(self):
+        c, b, f = self.t
+
+        return {'c': c, 'b': b.as_dict(), 'f': f.as_dict()}
+
+
+def color_from_dict(d):
+    t = d['t']
+
+    if t == '4':
+        return Color4(d['n'])
+
+    if t == '8':
+        return Color8(d['n'])
+
+    if t == '2':
+        return Color24(*d['v'])
+
+    if t == 'd':
+        return DefaultColor()
+
+    if t == 'p':
+        return PreparedColor(d['b'], d['f'])
+
+
+def attrs_from_dict(d):
+    return Attrs(c=d['c'], b=color_from_dict(d['b']), f=color_from_dict(d['f']))
+
+
+class ReverseAttrs:
+    __slots__ = ()
+
+    def combine(self, prev):
+        c, b, f = prev.t
+
+        return Attrs(c=c, b=f, f=b)
+
+
+class Async:
+    def __init__(self):
+        self.q = queue.SimpleQueue()
+
+        threading.Thread(target=self.runq, daemon=True).start()
+
+    def runq(self):
+        while True:
+            self.q.get()()
+
+    def schedule(self, f):
+        self.q.put(f)
+
+
+def singleton(func):
+    @functools.wraps(func)
+    def wrapper():
+        while True:
+            try:
+                return func.__result__
+            except AttributeError:
+                func.__result__ = func()
+
+    return wrapper
+
+
+@singleton
+def asyncmngr():
+    return Async()
+
+
+def schedule(f):
+    if PROFILE:
+        f()
+    else:
+        asyncmngr().schedule(f)
+
+
+class Display:
+    def __init__(self, ch):
+        self.ch = ch
+        self.dd = {}
+        self.dx, self.dy = self.ch.dims()
+
+    def title(self, t):
+        self.ch.title(t)
+
+    def flip(self, pixels):
+        ds = ''
+        dd = self.dd
+        bp = {}
+        dx = self.dx
+        dy = self.dy
+
+        for x, y, n in pixels:
+            if x >= 0 and x < dx and y >= 0 and y < dy:
+                k = x + y * 10000
+                v = bp.get(k)
+
+                if v:
+                    bp[k] = (x, y, n.combine(v[2]))
+                else:
+                    bp[k] = (x, y, n)
+
+        p = None
+
+        for k in sorted(bp.keys()):
+            x, y, n = bp[k]
+
+            f = n.fmt()
+
+            if f != dd.get(k):
+                dd[k] = f
+
+                if k - 1 == p:
+                    pass
+                else:
+                    ds += move(x, y)
+
+                p = k
+                ds += f
+
+        schedule(lambda: self.ch.send(ds))
+
+
+class Panel:
+    def __init__(self, w, h, p):
+        def pixels():
+            for y in range(0, h):
+                for x in range(0, w):
+                    yield x, y, p
+
+        self.d = list(pixels())
+
+    def pixels(self, attrs):
+        return self.d
+
+    def dispatch(self, ev):
+        return False
+
+
+def copy_dict(ev):
+    return json.loads(json.dumps(ev))
+
+
+class Handle:
+    def __init__(self, w):
+        self.w = w
+        self.move(0, 0)
+
+    def pixels(self, attrs):
+        dx = self.x
+        dy = self.y
+
+        for x, y, c in self.w.pixels(attrs):
+            yield x + dx, y + dy, c
+
+    def dispatch(self, ev):
+        if ev['t'] == 'm':
+            ev = copy_dict(ev)
+            v = ev['v']
+
+            if v['x'] >= self.x and v['y'] >= self.y:
+                v['x'] -= self.x
+                v['y'] -= self.y
+
+                return self.w.dispatch(ev)
+            else:
+                return False
+        else:
+            return self.w.dispatch(ev)
+
+    def move(self, x, y):
+        self.x = x
+        self.y = y
+
+        return self
+
+    @property
+    def width(self):
+        return self.w.width
+
+
+class Set:
+    def __init__(self):
+        self.o = []
+
+    def push_raw(self, w):
+        self.o.append(w)
+
+        return w
+
+    def pop(self):
+        return self.o.pop()
+
+    def pixels(self, attrs):
+        return itt.chain.from_iterable(o.pixels(attrs) for o in self.o)
+
+    def last(self):
+        return self.o[-1]
+
+    def dispatch(self, ev):
+        return any(o.dispatch(ev) for o in reversed(self.o))
+
+
+class Collection(Set):
+    def push(self, w):
+        return self.push_raw(Handle(w))
+
+
+class HSplit(Set):
+    @property
+    def width(self):
+        if self.o:
+            l = self.last()
+
+            return l.x + l.width
+
+        return 0
+
+    def push(self, w):
+        return self.push_raw(Handle(w).move(self.width, 0))
+
+
+def dict_update(d, **attrs):
+    return dict(itt.chain(d.items(), attrs.items()))
+
+
+class Stack(Collection):
+    def pixels(self, attrs):
+        def it():
+            last = len(self.o) - 1
+
+            for n, o in enumerate(self.o):
+                yield o.pixels(dict_update(attrs, focus=False) if n < last else attrs)
+
+        return itt.chain.from_iterable(it())
+
+
+def guess_lexer(p, d):
+    try:
+        return pl.guess_lexer_for_filename(p, d[:5000])
+    except pu.ClassNotFound:
+        return pl.guess_lexer(d[:10000])
+
+
+class HighLight:
+    CALL = re.compile('([a-zA-Z]\w*)\(')
+
+    DFLT = {
+        'dict',
+        'list',
+        'tuple',
+        'deque',
+        'int',
+        'str',
+        'defaultdict',
+        'bytes',
+        'bytearray',
+        'float',
+        'frozenset',
+        'memoryview',
+        'object',
+    }
+
+    def __init__(self, p, d):
+        self.lex = guess_lexer(p, d)
+        self.stl = ps.get_style_by_name('material')
+        self.lns = {}
+        self.col = {}
+
+    def parse_color(self, c):
+        while True:
+            try:
+                return self.col[c]
+            except KeyError:
+                self.col[c] = Color24(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+
+    def style(self, typ):
+        try:
+            return self.parse_color(self.stl.style_for_token(typ)['color'])
+        except KeyError:
+            return white()
+
+    def style_line_impl(self, l):
+        extra = dict(self.iter_calls(l))
+
+        for n, (ch, s) in enumerate(self.iter_pygments(l)):
+            yield ch, extra.get(n, s)
+
+    def iter_calls(self, l):
+        cc = self.style(pt.Name.Class)
+        cf = self.style(pt.Name.Function)
+
+        for m in re.finditer(self.CALL, l):
+            mm = m[1]
+
+            if mm[0].islower():
+                if mm in self.DFLT:
+                    co = cc
+                else:
+                    co = cf
+            else:
+                co = cc
+
+            for p in range(m.start(1), m.end(1)):
+                yield p, co
+
+    def iter_pygments(self, l):
+        for typ, text in self.lex.get_tokens(l):
+            s = self.style(typ)
+
+            for ch in text:
+                if ch == '\n':
+                    pass
+                else:
+                    yield ch, s
+
+    def style_line(self, l):
+        if len(self.lns) > 10000:
+            self.lns.clear()
+
+        while True:
+            try:
+                return self.lns[l]
+            except KeyError:
+                r = list(self.style_line_impl(l))
+
+                if len(r) != len(l):
+                    r = [(c, white()) for c in l]
+
+                self.lns[l] = r
+
+
+def calc_split(d):
+    for n, c in enumerate(d):
+        if c == '\n':
+            yield n
+
+    yield len(d)
+
+
+class TextArray:
+    def __init__(self, d):
+        self.d = d
+        self.split()
+
+    def split(self):
+        self.p = list(calc_split(self.d))
+
+    def at(self, pos):
+        if pos < 0:
+            raise IndexError()
+
+        d = self.d
+
+        if pos == len(d):
+            return None
+
+        return d[pos]
+
+    def replace(self, fr, to):
+        self.d = self.d.replace(fr, to)
+        self.split()
+
+    def delete(self, fr, to):
+        self.d = self.d[:fr] + self.d[to:]
+        self.split()
+
+    def insert(self, pos, c):
+        self.d = self.d[:pos] + c + self.d[pos:]
+        self.split()
+
+    def y(self, pos):
+        return bisect.bisect_left(self.p, pos)
+
+    def line_start(self, y):
+        return 0 if y == 0 else self.p[y - 1] + 1
+
+    def iter_chars_fwd(self, fr):
+        return map(self.d.__getitem__, itt.count(fr))
+
+    def iter_chars_bck(self, fr):
+        def endf():
+            raise IndexError()
+            yield
+
+        return map(self.d.__getitem__, itt.chain(range(fr, -1, -1), endf()))
+
+    def length(self):
+        return len(self.d)
+
+    def result(self):
+        return ('\n'.join(l.rstrip() for l in self.d.split('\n'))).strip() + '\n'
+
+    def search(self, t, fr):
+        return self.d.find(t, fr)
+
+    def line_count(self):
+        return len(self.p) - 1
+
+
+def gen_brackets():
+    for p in ('()', '[]', '{}'):
+        yield p[0], (p[1],  1)
+        yield p[1], (p[0], -1)
+
+
+class SearchContext:
+    def __init__(self, e):
+        self.e = e
+
+    def search_from(self, t, c):
+        e = self.e
+        p = e.t.search(t, c)
+
+        if p >= 0:
+            e.set_mark(p, p + len(t))
+            e.set_pos(p)
+            e.b.pub('cursor', p)
+
+        return p
+
+    def search(self, t):
+        self.search_from(t, self.e.c)
+
+    def search_next(self, t):
+        if self.search_from(t, self.e.c + 1) < 0:
+            self.e.b.msg(f'search wrap: {t}')
+            self.search_from(t, 0)
+
+
+class EmacsSequencer:
+    def __init__(self):
+        self.state = ''
+
+    def dispatch(self, ev):
+        if ev == 'ctrl-x':
+            self.state = ev
+        else:
+            try:
+                return self.state + '-' + ev if self.state else ev
+            finally:
+                self.state = ''
+
+
+class MouseSequencer:
+    def __init__(self):
+        self.press = False
+
+    def dispatch(self, ev):
+        ev = ev.copy()
+
+        if ev['press']:
+            if self.press:
+                ev['drag'] = True
+            else:
+                self.press = True
+        else:
+            self.press = False
+
+        return ev
+
+
+class EventSequencer:
+    def __init__(self):
+        self.k = EmacsSequencer()
+        self.m = MouseSequencer()
+
+    def dispatch(self, ev):
+        t, v = ev['t'], ev['v']
+
+        if t == 'k':
+            v = self.k.dispatch(v)
+
+            if v:
+                return dict_update(ev, v=v)
+        elif t == 'm':
+            return dict_update(ev, v=self.m.dispatch(v))
+        else:
+            return ev
+
+
+class IndentContext:
+    def __init__(self, l, cl):
+        self.i = self.calc_indent_for(l, cl)
+        self.o = 0
+
+    def next_indent(self):
+        res = self.i[self.o:]
+
+        if res:
+            self.o += 4
+        else:
+            self.o = 0
+
+        return res
+
+    def calc_indent_for(self, l, cl):
+        s = ''
+
+        for c in l:
+            if c == ' ':
+                s += c
+            else:
+                break
+
+        if l and l[-1] in (':', '{', '[', '('):
+            s += '    '
+        elif l.strip().split(' ')[0] in ('return', 'break', 'continue', 'raise', 'throw', 'pass'):
+            s = s[4:]
+
+        if cl and cl[0] in ('}', ']', ')'):
+            s = s[4:]
+
+        return s
+
+
+def load_text(fn):
+    try:
+        with open(fn) as f:
+            return (os.stat(f.fileno()).st_mode, f.read().replace('\t', '    '))
+    except FileNotFoundError:
+        return (0o644, '')
+
+
+def rev_str(s):
+    return s[::-1]
+
+
+def split_lines(it):
+    l = ''
+
+    try:
+        for ch in it:
+            if ch == '\n':
+                yield l
+
+                l = ''
+            else:
+                l += ch
+    except IndexError:
+        yield l
+
+
+class Editor:
+    BRKT = dict(gen_brackets())
+
+    def __init__(self, fn, db, bus, **attrs):
+        m, d = load_text(fn)
+
+        self.st_mode = m
+        self.fn = fn
+        self.md5 = str_hash(d)
+        self.ic = {}
+        self.h = HighLight(self.fn, d)
+        self.t = TextArray(d)
+        self.c = min(int(db.get(self.fn + '/cursor', 0)), self.t.length())
+        self.b = bus
+        self.unmark()
+        self.copy_to_buffer('')
+
+    def store(self, db):
+        db.set(self.fn + '/cursor', self.c)
+
+    def get_unmark(self):
+        try:
+            return self.get_mark()
+        finally:
+            self.unmark()
+
+    def unmark(self):
+        self.set_mark(None, None)
+
+    def set_mark(self, b, e):
+        self.mb = b
+        self.me = e
+
+    def get_mark(self):
+        b = self.mb
+        e = self.me
+
+        if b is None:
+            b = self.c
+
+        if e is None:
+            e = self.c
+
+        if e < b:
+            return e, b + 1
+
+        return b, e
+
+    def search_context(self):
+        return SearchContext(self)
+
+    def save(self, p):
+        t = p + '.tmp'
+
+        with open(t, 'w') as f:
+            f.write(self.t.result())
+
+        os.chmod(t, self.st_mode)
+        os.rename(t, p)
+
+    def complete_ratio(self):
+        return fractions.Fraction(self.c, max(self.t.length(), 1))
+
+    def x_for(self, c):
+        n = 0
+
+        try:
+            for ch in self.t.iter_chars_bck(c - 1):
+                if ch == '\n':
+                    break
+
+                n += 1
+        except IndexError:
+            pass
+
+        return n
+
+    def y_for(self, c):
+        return self.t.y(c)
+
+    def iter_xyc(self, fr, to):
+        if fr == to:
+            return
+
+        x = self.x_for(fr)
+        y = self.y_for(fr)
+
+        for c in itt.islice(self.t.iter_chars_fwd(fr), to - fr):
+            if c == '\n':
+                x = 0
+                y += 1
+            else:
+                yield x, y, c
+
+                x += 1
+
+    @property
+    def x(self):
+        return self.x_for(self.c)
+
+    @property
+    def y(self):
+        return self.y_for(self.c)
+
+    def set_y(self, y):
+        self.set_pos(self.pos_for_xy(self.x, y))
+
+    def pos_for_xy(self, x, y):
+        return self.t.line_start(y) + min(len(self.get_line(y)), x)
+
+    def iter_chars_fwd(self, p):
+        return enumerate(self.t.iter_chars_fwd(p), p)
+
+    def iter_chars_bck(self, p):
+        return zip(itt.count(p, -1), self.t.iter_chars_bck(p))
+
+    def find_bracket_match(self, cur):
+        o = self.t.at(cur)
+
+        if o in self.BRKT:
+            c, ov = self.BRKT[o]
+            tbl = {o: ov, c: -ov}
+            cnt = 0
+
+            for p, c in (self.iter_chars_fwd if ov > 0 else self.iter_chars_bck)(cur):
+                cnt += tbl.get(c, 0)
+
+                if cnt == 0:
+                    return p
+
+    def bracket_match(self):
+        try:
+            return self.find_bracket_match(self.c)
+        except IndexError:
+            pass
+
+    def iter_lines_from(self, fr):
+        return split_lines(self.t.iter_chars_fwd(self.t.line_start(fr)))
+
+    def iter_lines_before(self, p):
+        return map(rev_str, split_lines(self.t.iter_chars_bck(p - 1)))
+
+    def lines(self, fr, to):
+        return enumerate(itt.islice(self.iter_lines_from(fr), to - fr), fr)
+
+    def get_line(self, y):
+        for l in self.iter_lines_from(y):
+            return l
+
+    def render(self, x1, y1, x2, y2):
+        for y, s in self.lines(y1, y2):
+            l = self.h.style_line(s)
+
+            for x in range(x1, min(x2, len(l))):
+                c, col = l[x]
+
+                if c != ' ':
+                    yield x, y, Attrs(c=c, f=col)
+
+        for x, y, c in self.iter_xyc(*self.get_mark()):
+            yield x, y, Attrs(c=c, b=gray8(5))
+
+        bm = self.bracket_match()
+
+        if bm is not None:
+            yield self.x_for(bm), self.y_for(bm), Attrs(f=black(), b=Color4(12))
+
+    def get_indent_base_line(self, p):
+        for i in itt.islice(self.iter_lines_before(p), 1, None):
+            if i.strip():
+                return i
+
+        return ''
+
+    def get_indent_ctx(self, y, bi, cl):
+        key = struct_hash([y, bi, cl])
+
+        while True:
+            try:
+                return self.ic[key]
+            except KeyError:
+                self.ic[key] = IndentContext(bi, cl)
+
+    def calc_indent(self):
+        y = self.y
+        cl = self.get_line(y).strip()
+        bi = self.get_indent_base_line(self.c)
+
+        return self.get_indent_ctx(y, bi, cl).next_indent()
+
+    def ins_indent(self):
+        indent = self.calc_indent()
+
+        self.b.msg(f'indent: {indent}')
+        self.insert_text(self.c, indent)
+
+    def run_indent(self):
+        self.key_home()
+        self.del_space()
+        self.ins_indent()
+
+    def getch(self):
+        return self.t.at(self.c)
+
+    def space(self):
+        return self.getch() == ' '
+
+    def set_pos(self, c):
+        self.t.at(c)
+        self.c = c
+
+    def one_right(self):
+        self.set_pos(self.c + 1)
+
+    def one_left(self):
+        self.set_pos(self.c - 1)
+
+    def del_space(self):
+        while self.space():
+            self.key_delete()
+
+    def dispatch(self, ev, h):
+        t, v = ev['t'], ev['v']
+
+        if t == 'c':
+            self.handle_char(v)
+        elif t == 'm':
+            self.handle_mouse(v)
+        elif t == 'k':
+            self.handle_key(v, h)
+
+        return True
+
+    def begin_mark(self):
+        self.set_mark(self.c, None)
+
+    def end_mark(self):
+        self.set_mark(self.mb, self.c)
+
+    def key_ctrl_r(self):
+        self.b.pub('show-replace-dialog')
+
+    def key_ctrl_x_c(self):
+        if str_hash(self.t.result()) == self.md5:
+            raise KeyboardInterrupt()
+
+        self.b.pub('show-save-dialog')
+
+    def key_ctrl_x_ctrl_c(self):
+        self.key_ctrl_x_c()
+
+    def key_ctrl_x_s(self):
+        self.key_ctrl_s()
+
+    def key_ctrl_x_ctrl_s(self):
+        self.key_ctrl_x_s()
+
+    def key_ctrl_space(self):
+        self.begin_mark()
+
+    def key_ctrl_w(self):
+        self.b.msg('cut')
+        self.end_mark()
+        self.cut_selection()
+
+    def key_alt_w(self):
+        self.b.msg('copy')
+        self.end_mark()
+        self.copy_selection()
+
+    def key_ctrl_y(self):
+        self.b.msg('paste')
+        self.paste_from_buffer()
+
+    def paste(self, pos, txt):
+        self.insert_text(pos, txt)
+
+    def paste_from_buffer(self):
+        self.paste(self.c, self.buf)
+
+    def copy_to_buffer(self, txt):
+        self.buf = txt
+
+    def get_range(self, fr, to):
+        return ''.join(self.t.at(p) for p in range(fr, to))
+
+    def cut_range(self, fr, to):
+        try:
+            return self.get_range(fr, to)
+        finally:
+            self.t.delete(fr, to)
+
+    def cut_selection(self):
+        fr, to = self.get_unmark()
+
+        self.set_pos(fr)
+        self.copy_to_buffer(self.cut_range(fr, to))
+
+    def copy_selection(self):
+        self.copy_to_buffer(self.get_range(*self.get_unmark()))
+
+    def key_tab(self):
+        self.run_indent()
+
+    def key_pagedown(self, h):
+        for i in range(0, h):
+            self.key_down()
+
+    def key_pageup(self, h):
+        for i in range(0, h):
+            self.key_up()
+
+    def key_cr(self):
+        self.key_lf()
+
+    def key_lf(self):
+        self.handle_char('\n')
+
+    def key_home(self):
+        try:
+            self.one_left()
+
+            while self.getch() != '\n':
+                self.one_left()
+
+            self.one_right()
+        except IndexError:
+            pass
+
+    def key_end(self):
+        while self.getch() != '\n':
+            self.one_right()
+
+    def key_left(self):
+        self.one_left()
+
+        if self.space():
+            while self.space():
+                self.one_left()
+
+            self.one_right()
+
+    def key_right(self):
+        if self.space():
+            while self.space():
+                self.one_right()
+        else:
+            self.one_right()
+
+    def skip_at_max(self, cnt):
+        for i in range(0, cnt):
+            if self.getch() == '\n':
+                break
+
+            self.one_right()
+
+    def key_up(self):
+        x = self.x
+
+        self.key_home()
+        self.one_left()
+        self.key_home()
+        self.skip_at_max(x)
+
+    def key_down(self):
+        x = self.x
+
+        self.key_end()
+        self.one_right()
+        self.skip_at_max(x)
+
+    def key_bs(self):
+        self.one_left()
+
+        if self.space():
+            while self.space():
+                self.key_delete()
+                self.one_left()
+
+            self.one_right()
+        else:
+            self.key_delete()
+
+    def key_delete(self):
+        self.unmark()
+
+        if self.getch() == '\n':
+            self.ic.clear()
+
+        self.t.delete(self.c, self.c + 1)
+
+    def key_ctrl_s(self):
+        self.b.pub('show-search-dialog')
+
+    def handle_mouse(self, ev):
+        if ev.get('press'):
+            c = self.pos_for_xy(ev['x'], ev['y'])
+
+            if ev.get('drag'):
+                self.set_mark(self.mb, c)
+            else:
+                self.set_mark(c, c)
+
+    def handle_key(self, ev, h):
+        def unknown():
+            self.b.msg(f'do not know to do: {ev}')
+
+        func = getattr(self, 'key_' + ev.replace('-', '_'), unknown)
+
+        try:
+            try:
+                func()
+            except TypeError:
+                func(h)
+        except IndexError:
+            self.b.msg('index error')
+
+    def insert_text(self, pos, text):
+        self.unmark()
+
+        if '\n' in text:
+            self.ic.clear()
+
+        self.t.insert(pos, text)
+        self.set_pos(pos + len(text))
+
+    def replace(self, fr, to):
+        self.b.msg(f'replace {fr} {to}')
+
+        self.unmark()
+        self.ic.clear()
+        self.t.replace(fr, to)
+
+    def handle_char(self, ch):
+        self.insert_text(self.c, ch)
+
+        if ch == '\n':
+            self.run_indent()
+        elif self.get_line(self.y).strip() in (')', '}', ']'):
+            self.run_indent()
+            self.one_right()
+
+
+class ViewPort:
+    def __init__(self, w, h, e):
+        self.e = e
+        self.x = fractions.Fraction(0)
+        self.y = fractions.Fraction(0)
+        self.w = w
+        self.h = h
+        self.adjust()
+
+    def set_y(self, y):
+        if self.y != y:
+            self.e.set_y(y)
+            self.adjust()
+
+    def pixels(self, attrs):
+        bx = int(self.x)
+        by = int(self.y)
+
+        ex = bx + self.w
+        ey = by + self.h
+
+        if attrs['focus']:
+            yield self.cx, self.cy, Attrs(c=' ', f=white())
+
+        for x, y, a in self.e.render(bx, by, ex, ey):
+            if x < ex and y < ey:
+                yield x - bx, y - by, a
+
+        if attrs['focus']:
+            yield self.cx, self.cy, ReverseAttrs()
+
+    @property
+    def cx(self):
+        return self.e.x - int(self.x)
+
+    @property
+    def cy(self):
+        return self.e.y - int(self.y)
+
+    def set_width(self, w):
+        if self.w != w:
+            self.w = w
+            self.adjust()
+
+    def dispatch(self, ev):
+        if ev['t'] == 'm':
+            ev = copy_dict(ev)
+            v = ev['v']
+
+            v['x'] += int(self.x)
+            v['y'] += int(self.y)
+
+        if self.e.dispatch(ev, self.h):
+            self.adjust()
+
+            return True
+
+        return False
+
+    def adjust(self):
+        oy = self.y
+
+        hw = fractions.Fraction(self.w, 2)
+        hh = fractions.Fraction(self.h, 2)
+
+        while self.cx < 0:
+            self.x -= hw
+
+        self.x = max(self.x, 0)
+
+        while self.cy < 0:
+            self.y -= hh
+
+        self.y = max(self.y, 0)
+
+        while self.cx >= self.w:
+            self.x += hw
+
+        while self.cy >= self.h:
+            self.y += hh
+
+        if oy != self.y:
+            self.pub_lineno()
+
+        self.pub_xy()
+
+    def pub_xy(self):
+        self.e.b.pub('xy', {
+            'x': self.cx,
+            'y': self.cy,
+            'c': self.e.t.line_count(),
+        })
+
+    def pub_lineno(self):
+        self.e.b.pub('lineno', int(self.y))
+
+    def pub_all(self):
+        self.pub_xy()
+        self.pub_lineno()
+
+
+class Rect:
+    F = [0x2553, 0x2556, 0x255C, 0x2559, 0x2551]
+    U = [0x250C, 0x2510, 0x2518, 0x2514, 0x2502]
+
+    def __init__(self, w, h):
+        self.w = w
+        self.h = h
+
+    def chars(self, focus, **kwargs):
+        t = self.F if focus else self.U
+
+        yield 0, 0, t[0]
+        yield self.w - 1, 0, t[1]
+        yield self.w - 1, self.h - 1, t[2]
+        yield 0, self.h - 1, t[3]
+
+        for y in range(1, self.h - 1):
+            yield 0, y, t[4]
+            yield self.w - 1, y, t[4]
+
+        for x in range(1, self.w - 1):
+            yield x, 0, 0x2500
+            yield x, self.h - 1, 0x2500
+
+    def pixels(self, attrs):
+        for x, y, c in self.chars(**attrs):
+            yield x, y, Attrs(c=chr(c))
+
+    def dispatch(self, ev):
+        return False
+
+
+class Label:
+    def __init__(self, t=''):
+        self.t = t
+
+    def pixels(self, attrs):
+        for x, c in enumerate(self.t):
+            yield x, 0, Attrs(c=c)
+
+    def dispatch(self, ev):
+        return False
+
+    @property
+    def width(self):
+        return len(self.t)
+
+
+class VLine:
+    def __init__(self, h):
+        self.h = h
+
+    def pixels(self, attrs):
+        yield 0, 0, Attrs(c=chr(0x252C))
+        yield 0, self.h - 1, Attrs(c=chr(0x2534))
+
+        a = Attrs(c=chr(0x2502))
+
+        for y in range(1, self.h - 1):
+            yield 0, y, a
+
+    def dispatch(self, ev):
+        return False
+
+
+class LineNo:
+    def __init__(self, s, h):
+        self.s = s
+        self.h = h
+        self.m = s + h
+
+    @property
+    def f(self):
+        return min(self.s + self.h, self.m)
+
+    def set_lineno(self, s):
+        self.s = s
+
+    def set_max(self, v):
+        self.m = v
+
+    @property
+    def width(self):
+        return len(str(self.f))
+
+    def pixels(self, attrs):
+        f = gray8(8)
+
+        for x, y, c in self.chars():
+            yield x, y, Attrs(c=c, f=f)
+
+    def chars(self):
+        w = self.width
+
+        for y, s in enumerate(range(self.s, self.f)):
+            l = str(s)
+            dx = w - len(l)
+
+            for x, c in enumerate(l):
+                yield dx + x, y, c
+
+    def dispatch(self, ev):
+        if ev['t'] == 'm':
+            y = self.s + ev['v']['y']
+
+            if y < self.f:
+                self.on_select(y)
+
+                return True
+
+        return False
+
+    def on_select(self, lineno):
+        pass
+
+
+class HGrad:
+    def __init__(self, w):
+        self.w = w
+
+    def pixels(self, attrs):
+        for i in range(0, self.w):
+            v = math.pow(i / self.w, 1.5)
+
+            yield i, 0, Attrs(b=gray24(int(32 - v * 32)))
+
+    def dispatch(self, ev):
+        return False
+
+
+class TextInput:
+    def __init__(self, w):
+        self.w = w
+        self.reset()
+
+    def reset(self):
+        self.x = 0
+        self.c = 0
+        self.t = ''
+
+    @property
+    def width(self):
+        return min(self.w, len(self.t))
+
+    def on_text_change(self):
+        pass
+
+    def on_complete(self):
+        pass
+
+    def on_break(self):
+        self.on_complete()
+
+    @property
+    def cx(self):
+        return self.c - self.x
+
+    def render(self, focus=True, **attrs):
+        if focus:
+            yield self.c, Attrs(c=' ', f=white())
+
+        for x, c in enumerate(self.t):
+            yield x, Attrs(c=c)
+
+        if focus:
+            yield self.c, ReverseAttrs()
+
+    def pixels(self, attrs):
+        x1 = self.x
+        x2 = x1 + self.w
+
+        for x, a in self.render(**attrs):
+            if x >= x1 and x < x2:
+                yield x - x1, 0, a
+
+    def dispatch(self, ev):
+        t, v = ev['t'], ev['v']
+
+        try:
+            if t == 'c':
+                self.dispatch_chr(v)
+                self.key_right()
+            elif t == 'k':
+                self.dispatch_ev(v)
+        except IndexError:
+            pass
+
+        self.adjust()
+
+        # TODO
+        return True
+
+    def dispatch_chr(self, ch):
+        self.t = self.t[:self.c] + ch + self.t[self.c:]
+        self.on_text_change()
+
+    def at(self, p):
+        if p < 0:
+            raise IndexError()
+
+        if p == len(self.t):
+            return None
+
+        return self.t[p]
+
+    def set_pos(self, p):
+        self.at(p)
+        self.c = p
+
+    def key_cr(self):
+        self.key_lf()
+
+    def key_lf(self):
+        self.on_complete()
+
+    def key_bs(self):
+        self.key_left()
+        self.key_delete()
+
+    def key_delete(self):
+        self.t = self.t[:self.c] + self.t[self.c + 1:]
+        self.on_text_change()
+
+    def key_left(self):
+        self.set_pos(self.c - 1)
+
+    def key_right(self):
+        self.set_pos(self.c + 1)
+
+    def dispatch_ev(self, ev):
+        getattr(self, 'key_' + ev.replace('-', '_'), self.on_break)()
+
+    def adjust(self):
+        hw = self.w // 2
+
+        while self.cx < 0:
+            self.x -= hw
+
+        while self.cx >= self.w:
+            self.x += hw
+
+        self.x = max(self.x, 0)
+        self.x = min(self.x, self.w - 1)
+
+
+class YesNo(Label):
+    def on_yes(self):
+        pass
+
+    def on_no(self):
+        pass
+
+    def dispatch(self, ev):
+        t, v = ev['t'], ev['v']
+
+        if t == 'c':
+            if v == 'y':
+                self.on_yes()
+            else:
+                self.on_no()
+
+            return True
+
+        return False
+
+
+def fake_widget(w, h):
+    panel = Panel(w, h, Attrs(c=' ', b=Color4(9), f=white()))
+
+    class Fake:
+        def pixels(self, attrs):
+            return panel.pixels(attrs)
+
+        def dispatch(self, ev):
+            return True
+
+    return Fake()
+
+
+def editor_widget(ed, bus, w, h):
+    if w < 15 or h < 5:
+        return fake_widget(w, h)
+
+    msg = bus.msg
+
+    mw_w = Stack()
+
+    st_w = mw_w.push_raw(Collection())
+
+    st_w.push_raw(Panel(w, h, Attrs(c=' ', b=DefaultColor(), f=white())))
+    st_w.push_raw(Rect(w, h))
+
+    vl_w = VLine(h)
+    lb_w = Label()
+    cp_w = HGrad(w - 2)
+    pp_w = Panel(1, 1, Attrs(b=gray8(14)))
+    vp_w = ViewPort(w, h - 2, ed)
+
+    class EditorLineNo(LineNo):
+        def on_select(self, lineno):
+            try:
+                vp_w.set_y(lineno)
+            except IndexError:
+                msg('index error')
+
+    ln_w = EditorLineNo(0, h - 2)
+
+    ln_h = st_w.push(ln_w)
+    vl_h = st_w.push(vl_w)
+    lb_h = st_w.push(lb_w)
+    cp_h = st_w.push(cp_w)
+    pp_h = st_w.push(pp_w)
+    vp_h = st_w.push(vp_w)
+
+    def on_lineno(ln):
+        ln_w.set_lineno(ln)
+        ln_h.move(1, 1)
+        vl_h.move(ln_h.x + ln_w.width, 0)
+        lb_h.move(1, 0)
+        vp_h.move(vl_h.x + 1, 1)
+        vp_w.set_width(w - 2 - vl_h.x)
+
+    def on_message(m):
+        lb_w.t = m
+
+    def on_cursor(c):
+        vp_w.adjust()
+
+    def on_xy(c):
+        pp_h.move(vl_h.x, int(ln_h.y + (ln_w.h - 1) * ed.complete_ratio()))
+        cp_h.move(1, vp_h.y + c['y'])
+        ln_w.set_max(c['c'])
+
+    class Input(TextInput):
+        def on_break(self):
+            msg('break')
+            mw_w.pop()
+
+    def add_dialog(d):
+        return mw_w.push(d).move(1, h - 1).w
+
+    def on_show_search_dialog():
+        msg('search')
+
+        ctx = ed.search_context()
+
+        class SearchDialog(Input):
+            def on_text_change(self):
+                msg(f'search for: {self.t}')
+                ctx.search(self.t)
+
+            def key_ctrl_s(self):
+                msg(f'search next: {self.t}')
+                ctx.search_next(self.t)
+
+            def on_complete(self):
+                mw_w.pop()
+
+        d = add_dialog(HSplit())
+
+        d.push(Label('text: '))
+        d.push(SearchDialog(w - 2 - d.width))
+
+    def on_show_save_dialog():
+        msg('save')
+
+        class SaveDialog(YesNo):
+            def on_complete(self):
+                mw_w.pop()
+
+                raise KeyboardInterrupt()
+
+            def on_yes(self):
+                bus.pub('save')
+                self.on_complete()
+
+            def on_no(self):
+                self.on_complete()
+
+        add_dialog(SaveDialog('save file, y/n?'))
+
+    def on_show_replace_dialog():
+        msg('replace')
+
+        class To(Input):
+            def __init__(self, w, t):
+                TextInput.__init__(self, w)
+                self.fr = t
+
+            def on_complete(self):
+                mw_w.pop()
+                ed.replace(self.fr, self.t)
+
+        d = add_dialog(HSplit())
+
+        class From(Input):
+            def on_complete(self):
+                d.push(Label(' to: '))
+                d.push(To(w - 2 - d.width, self.t))
+
+        d.push(Label('from: '))
+        d.push(From(w - 2 - d.width))
+
+    for k in list(locals()):
+        if k.startswith('on_'):
+            bus.sub(k[3:].replace('_', '-'), locals()[k])
+
+    vp_w.pub_all()
+
+    return mw_w
+
+
+class ProfileInputStream:
+    def __init__(self):
+        def gen():
+            for n in range(0, 10):
+                for i in range(0, 150):
+                    yield 'down'
+
+                for i in range(0, 150):
+                    yield 'up'
+
+            while True:
+                yield 'ctrl-x-c'
+
+        def gen_ev():
+            for v in gen():
+                yield {'t': 'k', 'v': v}
+
+        self.g = gen_ev()
+
+    def next_bulk(self, n):
+        return [next(self.g) for i in range(0, n)]
+
+
+def describe_event(ev):
+    t, v = ev['t'], ev['v']
+
+    if t == 'c':
+        v = ', '.join(str(x) for x in v.encode())
+
+        return f'unicode: {v}'
+
+    if t == 'k':
+        return f'key: {v}'
+
+    if t == 'm':
+        return f'mouse: {str(v)[1:-1]}'
+
+    return f'unknown: {ev}'
+
+
+class EventLoop:
+    def __init__(self):
+        self.c = Channel()
+
+    def fini(self):
+        self.c.fini()
+
+    def event_loop(self, w):
+        while True:
+            try:
+                d = Display(self.c)
+                i = ProfileInputStream() if PROFILE else InputStream(self.c)
+
+                w.reshape(d)
+
+                return self.event_loop_step(d, i, w)
+            except SigWinch:
+                pass
+
+    def event_loop_step(self, d, i, w):
+        while True:
+            d.flip(w.pixels(dict(focus=True)))
+
+            try:
+                for ev in i.next_bulk(32):
+                    w.dispatch(ev)
+            except SigWinch:
+                raise
+            except BadInput as e:
+                w.msg(f'bad input: {e}')
+
+
+def load_config(p):
+    try:
+        return json.loads(open(p, 'r').read())
+    except Exception:
+        return {}
+
+
+class Db:
+    def __init__(self, p):
+        self.c = sqlite3.connect(p)
+
+        try:
+            self.c.execute('CREATE TABLE db (key TEXT UNIQUE, value TEXT)')
+        except Exception as e:
+            if 'table db already exists' not in str(e):
+                raise
+
+    def get(self, k, d):
+        for r in self.c.execute(f'SELECT value FROM db WHERE key = "{k}"'):
+            return r[0]
+
+        return d
+
+    def set(self, k, v):
+        self.c.execute(f'INSERT OR REPLACE INTO db (key, value) VALUES ("{k}", "{v}")')
+
+    def close(self):
+        self.c.commit()
+        self.c.close()
+
+
+class Main:
+    def __init__(self, path):
+        pr = os.path.expanduser('~/.config/ted')
+
+        try:
+            os.makedirs(pr)
+        except OSError:
+            pass
+
+        cf = load_config(os.path.join(pr, 'ted.json'))
+        fn = os.path.normpath(os.path.abspath(path))
+
+        self.sq = EventSequencer()
+        self.db = Db(os.path.join(pr, 'ted.db'))
+        self.ed = Editor(fn, self.db, self, **cf)
+
+    def pub(self, t, *args, **kwargs):
+        self.bs.pub(t, *args, **kwargs)
+
+    def msg(self, m):
+        self.pub('message', m)
+
+    def save(self, fn):
+        self.ed.save(fn)
+
+    def save_file(self):
+        self.save(self.ed.fn)
+
+    def save_backup(self):
+        self.save(self.ed.fn + '.bak')
+
+    def create_bus(self):
+        return PubSub().sub('save', self.save_file)
+
+    def reshape(self, d):
+        d.title(os.path.basename(self.ed.fn))
+
+        self.bs = self.create_bus()
+        self.wi = editor_widget(self.ed, self.bs, d.dx, d.dy)
+
+    def pixels(self, attrs):
+        return self.wi.pixels(attrs)
+
+    def dispatch(self, ev):
+        ev = self.sq.dispatch(ev)
+
+        if ev:
+            self.msg(f'got {describe_event(ev)}')
+            self.wi.dispatch(ev)
+
+    def test_perf_1(self):
+        t = time.time()
+        x = 0
+
+        for i in range(0, 1000):
+            for l in self.ed.iter_lines_from(0):
+                x += len(l)
+
+        print(x, time.time() - t)
+
+    def test_perf_2(self):
+        t = time.time()
+        x = 0
+
+        for i in range(0, 1000):
+            for l in self.ed.iter_lines_before(20000):
+                x += len(l)
+
+        print(x, time.time() - t)
+
+    def fini(self):
+        self.ed.store(self.db)
+        self.db.close()
+
+
+@contextlib.contextmanager
+def context(ch):
+    try:
+        yield ch
+    finally:
+        ch.fini()
+
+
+def main(path, loop):
+    with context(Main(path)) as m:
+        try:
+            with context(loop()) as l:
+                return l.event_loop(m)
+        except KeyboardInterrupt:
+            raise
+        except:
+            m.save_backup()
+
+            raise
+
+
+if __name__ == '__main__':
+    try:
+        def run_main():
+            main(sys.argv[1], EventLoop)
+
+        if PROFILE:
+            cProfile.run('run_main()')
+        else:
+            run_main()
+    except KeyboardInterrupt:
+        pass
