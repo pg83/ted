@@ -1333,8 +1333,17 @@ class Editor:
     def end_mark(self):
         self.set_mark(self.mb, self.c)
 
+    def key_f3(self):
+        if self.mb and self.me is None:
+            self.end_mark()
+        else:
+            self.begin_mark()
+
     def key_ctrl_r(self):
         self.b.pub('show-replace-dialog')
+
+    def key_f10(self):
+        self.key_ctrl_x_c()
 
     def key_ctrl_x_c(self):
         if str_hash(self.t.result()) == self.md5:
@@ -1354,10 +1363,19 @@ class Editor:
     def key_ctrl_space(self):
         self.begin_mark()
 
+    def key_f5(self):
+        self.b.msg('copy-paste')
+        self.copy_selection()
+        self.paste_from_buffer()
+
+    def key_f6(self):
+        self.b.msg('move')
+        self.move_selection()
+
     def key_ctrl_w(self):
         self.b.msg('cut')
         self.end_mark()
-        self.cut_selection()
+        self.set_pos(self.cut_selection())
 
     def key_alt_w(self):
         self.b.msg('copy')
@@ -1389,8 +1407,22 @@ class Editor:
     def cut_selection(self):
         fr, to = self.get_unmark()
 
-        self.set_pos(fr)
         self.copy_to_buffer(self.cut_range(fr, to))
+
+        return fr
+
+    def move_selection(self):
+        fr, to = self.get_unmark()
+
+        tl = to - fr
+
+        if self.c > fr:
+            self.t.insert(self.c, self.get_range(fr, to))
+            self.cut_range(fr, to)
+            self.set_pos(self.c - tl)
+        else:
+            self.t.insert(self.c, self.cut_range(fr, to))
+            self.set_pos(self.c + tl)
 
     def copy_selection(self):
         self.copy_to_buffer(self.get_range(*self.get_unmark()))
@@ -1487,6 +1519,9 @@ class Editor:
 
     def key_ctrl_s(self):
         self.b.pub('show-search-dialog')
+
+    def key_f7(self):
+        self.key_ctrl_s()
 
     def handle_mouse(self, ev):
         if ev.get('press'):
@@ -1992,6 +2027,9 @@ def editor_widget(ed, bus, w, h):
             def key_ctrl_s(self):
                 msg(f'search next: {self.t}')
                 ctx.search_next(self.t)
+
+            def key_f7(self):
+                self.key_ctrl_s()
 
             def on_complete(self):
                 mw_w.pop()
