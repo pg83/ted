@@ -112,8 +112,8 @@ class Channel:
         signal.signal(signal.SIGWINCH, self.sigwinch)
 
     def fini(self):
+        os.system('stty echo -raw')
         os.system('tput reset')
-        os.system('stty -raw')
 
     def title(self, t):
         self.send(title(t))
