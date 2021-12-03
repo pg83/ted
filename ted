@@ -707,6 +707,17 @@ class Handle:
             yield x + dx, y + dy, c
 
     def dispatch(self, ev):
+        if ev['t'] == 'p':
+            r = self.w.dispatch(ev)
+
+            if r:
+                return {
+                    'x': self.x + r['x'],
+                    'y': self.y + r['y'],
+                }
+
+            return False
+
         if ev['t'] == 'm':
             ev = copy_dict(ev)
             v = ev['v']
@@ -751,7 +762,9 @@ class Set:
         return self.o[-1]
 
     def dispatch(self, ev):
-        return any(o.dispatch(ev) for o in reversed(self.o))
+        for o in reversed(self.o):
+            if res := o.dispatch(ev):
+                return res
 
 
 class Collection(Set):
@@ -771,6 +784,26 @@ class HSplit(Set):
 
     def push(self, w):
         return self.push_raw(Handle(w).move(self.width, 0))
+
+
+class BackGround:
+    def __init__(self, w):
+        self.w = w
+
+    def pixels(self, attrs):
+        r = list(self.w.pixels(attrs))
+
+        mx = max((v[0] for v in r))
+        my = max((v[1] for v in r))
+
+        for x in range(0, mx + 1):
+            for y in range(0, my + 1):
+                yield x, y, Attrs(c=' ', f=white())
+
+        yield from r
+
+    def dispatch(self, ev):
+        return self.w.dispatch(ev)
 
 
 def dict_update(d, **attrs):
@@ -1593,15 +1626,9 @@ class ViewPort:
         ex = bx + self.w
         ey = by + self.h
 
-        if attrs['focus']:
-            yield self.cx, self.cy, Attrs(c=' ', f=white())
-
         for x, y, a in self.e.render(bx, by, ex, ey):
             if x < ex and y < ey:
                 yield x - bx, y - by, a
-
-        if attrs['focus']:
-            yield self.cx, self.cy, ReverseAttrs()
 
     @property
     def cx(self):
@@ -1617,6 +1644,12 @@ class ViewPort:
             self.adjust()
 
     def dispatch(self, ev):
+        if ev['t'] == 'p':
+            return {
+                'x': int(self.cx),
+                'y': int(self.cy),
+            }
+
         if ev['t'] == 'm':
             ev = copy_dict(ev)
             v = ev['v']
@@ -1726,12 +1759,12 @@ class VLine:
         self.h = h
 
     def pixels(self, attrs):
-        yield 0, 0, Attrs(c=chr(0x252C))
-        yield 0, self.h - 1, Attrs(c=chr(0x2534))
+        #yield 0, 0, Attrs(c=chr(0x252C))
+        #yield 0, self.h - 1, Attrs(c=chr(0x2534))
 
         a = Attrs(c=chr(0x2502))
 
-        for y in range(1, self.h - 1):
+        for y in range(0, self.h):
             yield 0, y, a
 
     def dispatch(self, ev):
@@ -1830,15 +1863,9 @@ class TextInput:
     def cx(self):
         return self.c - self.x
 
-    def render(self, focus=True, **attrs):
-        if focus:
-            yield self.c, Attrs(c=' ', f=white())
-
+    def render(self, **attrs):
         for x, c in enumerate(self.t):
             yield x, Attrs(c=c)
-
-        if focus:
-            yield self.c, ReverseAttrs()
 
     def pixels(self, attrs):
         x1 = self.x
@@ -1849,6 +1876,12 @@ class TextInput:
                 yield x - x1, 0, a
 
     def dispatch(self, ev):
+        if ev['t'] == 'p':
+            return {
+                'x': self.cx,
+                'y': 0,
+            }
+
         t, v = ev['t'], ev['v']
 
         try:
@@ -1926,6 +1959,12 @@ class YesNo(Label):
         pass
 
     def dispatch(self, ev):
+        if ev['t'] == 'p':
+            return {
+                'x': 0,
+                'y': 0,
+            }
+
         t, v = ev['t'], ev['v']
 
         if t == 'c':
@@ -1952,6 +1991,22 @@ def fake_widget(w, h):
     return Fake()
 
 
+class CursorB:
+    def pixels(self, attrs):
+        yield 0, 0, Attrs(' ', f=white())
+
+    def dispatch(self, ev):
+        return False
+
+
+class CursorF:
+    def pixels(self, attrs):
+        yield 0, 0, ReverseAttrs()
+
+    def dispatch(self, ev):
+        return False
+
+
 def editor_widget(ed, bus, w, h):
     if w < 15 or h < 5:
         return fake_widget(w, h)
@@ -1963,13 +2018,14 @@ def editor_widget(ed, bus, w, h):
     st_w = mw_w.push_raw(Collection())
 
     st_w.push_raw(Panel(w, h, Attrs(c=' ', b=DefaultColor(), f=white())))
-    st_w.push_raw(Rect(w, h))
 
+    cb_w = CursorB()
     vl_w = VLine(h)
     lb_w = Label()
-    cp_w = HGrad(w - 2)
+    cp_w = HGrad(w)
     pp_w = Panel(1, 1, Attrs(b=gray8(14)))
-    vp_w = ViewPort(w, h - 2, ed)
+    vp_w = ViewPort(w, h, ed)
+    cf_w = CursorF()
 
     class EditorLineNo(LineNo):
         def on_select(self, lineno):
@@ -1978,32 +2034,37 @@ def editor_widget(ed, bus, w, h):
             except IndexError:
                 msg('index error')
 
-    ln_w = EditorLineNo(0, h - 2)
+    ln_w = EditorLineNo(0, h)
 
+    cb_h = st_w.push(cb_w)
     ln_h = st_w.push(ln_w)
     vl_h = st_w.push(vl_w)
     lb_h = st_w.push(lb_w)
     cp_h = st_w.push(cp_w)
     pp_h = st_w.push(pp_w)
     vp_h = st_w.push(vp_w)
+    cf_h = st_w.push(cf_w)
 
     def on_lineno(ln):
         ln_w.set_lineno(ln)
-        ln_h.move(1, 1)
+        ln_h.move(0, 0)
         vl_h.move(ln_h.x + ln_w.width, 0)
-        lb_h.move(1, 0)
-        vp_h.move(vl_h.x + 1, 1)
-        vp_w.set_width(w - 2 - vl_h.x)
+        align_msg()
+        vp_h.move(vl_h.x + 1, 0)
+        vp_w.set_width(w - vl_h.x)
 
     def on_message(m):
         lb_w.t = m
+        align_msg()
+
+    def align_msg():
+        lb_h.move(w - len(lb_w.t), 0)
 
     def on_cursor(c):
         vp_w.adjust()
 
     def on_xy(c):
         pp_h.move(vl_h.x, int(ln_h.y + (ln_w.h - 1) * ed.complete_ratio()))
-        cp_h.move(1, vp_h.y + c['y'])
         ln_w.set_max(c['c'])
 
     class Input(TextInput):
@@ -2012,7 +2073,7 @@ def editor_widget(ed, bus, w, h):
             mw_w.pop()
 
     def add_dialog(d):
-        return mw_w.push(d).move(1, h - 1).w
+        return mw_w.push(BackGround(d)).move(vl_h.x + 2, h - 1).w.w
 
     def on_show_search_dialog():
         msg('search')
@@ -2069,7 +2130,7 @@ def editor_widget(ed, bus, w, h):
                 mw_w.pop()
                 ed.replace(self.fr, self.t)
 
-        d = add_dialog(HSplit())
+        d = add_dialog(HSplit()).w
 
         class From(Input):
             def on_complete(self):
@@ -2085,7 +2146,18 @@ def editor_widget(ed, bus, w, h):
 
     vp_w.pub_all()
 
-    return mw_w
+    class WWW:
+        def pixels(self, attrs):
+            return mw_w.pixels(attrs)
+
+        def dispatch(self, ev):
+            if mw_w.dispatch(ev):
+                if res:= mw_w.dispatch({'t': 'p'}):
+                    cb_h.move(res['x'], res['y'])
+                    cp_h.move(0, res['y'])
+                    cf_h.move(res['x'], res['y'])
+
+    return WWW()
 
 
 class ProfileInputStream:
