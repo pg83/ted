@@ -640,10 +640,10 @@ class Handle:
                 v['y'] -= self.y
 
                 return self.w.dispatch(ev)
-            else:
-                return False
-        else:
-            return self.w.dispatch(ev)
+
+            return False
+
+        return self.w.dispatch(ev)
 
     def move(self, x, y):
         self.x = x
@@ -921,7 +921,6 @@ class SearchContext:
         if p >= 0:
             e.set_mark(p, p + len(t))
             e.set_pos(p)
-            e.b.pub('cursor', p)
 
         return p
 
@@ -1530,12 +1529,12 @@ class ViewPort:
         self.y = fractions.Fraction(0)
         self.w = w
         self.h = h
-        self.adjust()
+        #self.adjust()
 
     def set_y(self, y):
         if self.y != y:
             self.e.set_y(y)
-            self.adjust()
+            #self.adjust()
 
     def pixels(self, attrs):
         bx = int(self.x)
@@ -1559,7 +1558,7 @@ class ViewPort:
     def set_width(self, w):
         if self.w != w:
             self.w = w
-            self.adjust()
+            #self.adjust()
 
     def dispatch(self, ev):
         if ev['t'] == 'p':
@@ -1576,7 +1575,7 @@ class ViewPort:
             v['y'] += int(self.y)
 
         if self.e.dispatch(ev, self.h):
-            self.adjust()
+            #self.adjust()
 
             return True
 
@@ -1603,25 +1602,6 @@ class ViewPort:
 
         while self.cy >= self.h:
             self.y += hh
-
-        if oy != self.y:
-            self.pub_lineno()
-
-        self.pub_xy()
-
-    def pub_xy(self):
-        self.e.b.pub('xy', {
-            'x': self.cx,
-            'y': self.cy,
-            'c': self.e.t.line_count(),
-        })
-
-    def pub_lineno(self):
-        self.e.b.pub('lineno', int(self.y))
-
-    def pub_all(self):
-        self.pub_xy()
-        self.pub_lineno()
 
 
 class Rect:
@@ -1978,23 +1958,17 @@ def editor_widget(ed, bus, w, h):
 
     def reparent():
         ln_h.move(0, 0)
+        ln_w.set_max(ed.t.line_count())
+        ln_w.set_lineno(int(vp_w.y))
         vl_h.move(ln_h.x + ln_w.width, 0)
         lb_h.move(w - len(lb_w.t), 0)
         vp_h.move(vl_h.x + 1, 0)
-        vp_w.set_width(w - vl_h.x)
+        vp_w.set_width(w - vp_h.x)
         pp_h.move(vl_h.x, int(ln_h.y + (ln_w.h - 1) * ed.complete_ratio()))
-
-    def on_lineno(ln):
-        ln_w.set_lineno(ln)
+        vp_w.adjust()
 
     def on_message(m, **attrs):
         lb_w.t = [Attrs(c=c, **attrs) for c in m]
-
-    def on_cursor(c):
-        vp_w.adjust()
-
-    def on_xy(c):
-        ln_w.set_max(c['c'])
 
     class Input(TextInput):
         def on_break(self):
@@ -2073,22 +2047,22 @@ def editor_widget(ed, bus, w, h):
         if k.startswith('on_'):
             bus.sub(k[3:].replace('_', '-'), locals()[k])
 
-    vp_w.pub_all()
-
-    class WWW:
+    class Widget:
         def pixels(self, attrs):
             reparent()
+            reparent()
+
+            if res:= mw_w.dispatch({'t': 'p'}):
+                cb_h.move(res['x'], res['y'])
+                cp_h.move(0, res['y'])
+                cf_h.move(res['x'], res['y'])
 
             return mw_w.pixels(attrs)
 
         def dispatch(self, ev):
-            if mw_w.dispatch(ev):
-                if res:= mw_w.dispatch({'t': 'p'}):
-                    cb_h.move(res['x'], res['y'])
-                    cp_h.move(0, res['y'])
-                    cf_h.move(res['x'], res['y'])
+            return mw_w.dispatch(ev)
 
-    return WWW()
+    return Widget()
 
 
 class ProfileInputStream:
