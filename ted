@@ -745,6 +745,16 @@ def parse_color(c):
     return Color24(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
 
 
+def load_style(vars):
+    for v in vars:
+        try:
+            return ps.get_style_by_name(v)
+        except Exception:
+            pass
+
+    return ps.get_style_by_name('default')
+
+
 class HighLight:
     CALL = re.compile('([a-zA-Z]\w*)\(')
 
@@ -766,7 +776,7 @@ class HighLight:
 
     def __init__(self, p, d):
         self.lex = guess_lexer(p, d)
-        self.stl = ps.get_style_by_name('inkpot')
+        self.stl = load_style(['lovelace'])
         self.dbg = self.stl.background_color
         self.lns = {}
         self.typ = {}
@@ -783,9 +793,10 @@ class HighLight:
                 r['b'] = parse_color(col)
 
         if 'string' in str(typ).lower():
-            cr, cg, cb = r['f'].t
+            if 'f' in r:
+                cr, cg, cb = r['f'].t
 
-            r['b'] = Color24(cr // 8, cg // 8, cb // 8)
+                r['b'] = Color24(cr // 8, cg // 8, cb // 8)
 
         return r
 
