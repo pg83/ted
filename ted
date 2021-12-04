@@ -53,8 +53,8 @@ class PubSub:
         for f in self.s.get(t, []):
             f(*args, **kwargs)
 
-    def msg(self, m):
-        self.pub('message', m)
+    def msg(self, m, **kwargs):
+        self.pub('message', m, **kwargs)
 
 
 def esc(d):
@@ -1495,7 +1495,7 @@ class Editor:
             except TypeError:
                 func(h)
         except IndexError:
-            self.b.msg('index error')
+            self.b.msg('index error', b=Color4(1), f=black())
 
     def insert_text(self, pos, text):
         self.unmark()
@@ -1663,6 +1663,22 @@ class Label:
     def pixels(self, attrs):
         for x, c in enumerate(self.t):
             yield x, 0, Attrs(c=c)
+
+    def dispatch(self, ev):
+        return False
+
+    @property
+    def width(self):
+        return len(self.t)
+
+
+class ColorLabel:
+    def __init__(self):
+        self.t = []
+
+    def pixels(self, attrs):
+        for x, a in enumerate(self.t):
+            yield x, 0, a
 
     def dispatch(self, ev):
         return False
@@ -1936,7 +1952,7 @@ def editor_widget(ed, bus, w, h):
 
     cb_w = CursorB()
     vl_w = VLine(h)
-    lb_w = Label()
+    lb_w = ColorLabel()
     cp_w = HGrad(w)
     pp_w = Panel(1, 1, Attrs(b=gray8(14)))
     vp_w = ViewPort(w, h, ed)
@@ -1954,11 +1970,11 @@ def editor_widget(ed, bus, w, h):
     cb_h = st_w.push(cb_w)
     ln_h = st_w.push(ln_w)
     vl_h = st_w.push(vl_w)
-    lb_h = st_w.push(lb_w)
     pp_h = st_w.push(pp_w)
     vp_h = st_w.push(vp_w)
     cp_h = st_w.push(cp_w)
     cf_h = st_w.push(cf_w)
+    lb_h = st_w.push(lb_w)
 
     def on_lineno(ln):
         ln_w.set_lineno(ln)
@@ -1968,8 +1984,8 @@ def editor_widget(ed, bus, w, h):
         vp_h.move(vl_h.x + 1, 0)
         vp_w.set_width(w - vl_h.x)
 
-    def on_message(m):
-        lb_w.t = m
+    def on_message(m, **attrs):
+        lb_w.t = [Attrs(c=c, **attrs) for c in m]
         align_msg()
 
     def align_msg():
@@ -2139,7 +2155,7 @@ class EventLoop:
             d.flip(w.pixels(dict(focus=True)))
 
             try:
-                for ev in i.next_bulk(32):
+                for ev in i.next_bulk(1000):
                     w.dispatch(ev)
             except SigWinch:
                 raise
@@ -2197,8 +2213,8 @@ class Main:
     def pub(self, t, *args, **kwargs):
         self.bs.pub(t, *args, **kwargs)
 
-    def msg(self, m):
-        self.pub('message', m)
+    def msg(self, m, **attrs):
+        self.pub('message', m, **attrs)
 
     def save(self, fn):
         self.ed.save(fn)
