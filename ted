@@ -432,7 +432,6 @@ TBL4BG = [csim(40 + n if n < 8 else 92 + n) for n in range(0, 16)]
 TBL4FG = [csim(30 + n if n < 8 else 82 + n) for n in range(0, 16)]
 
 
-
 class Color4:
     __slots__ = 'n'
 
@@ -492,9 +491,6 @@ class Attrs:
         c2, b2, f2 = self.t
 
         return Attrs(c=c2 or c1, b=b2 or b1, f=f2 or f1)
-
-    def char(self):
-        return self.t[0]
 
 
 class ReverseAttrs:
@@ -783,7 +779,7 @@ class HighLight:
 
     def __init__(self, p, d):
         self.lex = guess_lexer(p, d)
-        self.stl = ps.get_style_by_name('arduino')
+        self.stl = ps.get_style_by_name('inkpot')
         self.dbg = self.stl.background_color
         self.lns = {}
         self.typ = {}
@@ -802,7 +798,12 @@ class HighLight:
             if ch == '\n':
                 pass
             else:
-                yield Attrs(c=ch, **self.style(extra.get(n, s)))
+                s = self.style(extra.get(n, s))
+
+                if ch == ' ' and 'b' not in s:
+                    yield None
+                else:
+                    yield Attrs(c=ch, **s)
 
     def iter_calls(self, l):
         cc = pt.Name.Class
@@ -1195,9 +1196,7 @@ class Editor:
             l = self.h.style_line(s)
 
             for x in range(x1, min(x2, len(l))):
-                a = l[x]
-
-                if a.char() != ' ':
+                if a := l[x]:
                     yield x, y, a
 
         for x, y, c in self.iter_xyc(*self.get_mark()):
@@ -2106,7 +2105,7 @@ def describe_event(ev):
         return f'unicode: {v}'
 
     if t == 'k':
-        return f'key: {v}'
+        return v
 
     if t == 'm':
         return f'mouse: {str(v)[1:-1]}'
@@ -2224,7 +2223,7 @@ class Main:
         ev = self.sq.dispatch(ev)
 
         if ev:
-            self.msg(f'got {describe_event(ev)}')
+            self.msg(f'{describe_event(ev)}')
             self.wi.dispatch(ev)
 
     def test_perf_1(self):
