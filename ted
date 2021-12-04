@@ -1976,26 +1976,24 @@ def editor_widget(ed, bus, w, h):
     cf_h = st_w.push(cf_w)
     lb_h = st_w.push(lb_w)
 
-    def on_lineno(ln):
-        ln_w.set_lineno(ln)
+    def reparent():
         ln_h.move(0, 0)
         vl_h.move(ln_h.x + ln_w.width, 0)
-        align_msg()
+        lb_h.move(w - len(lb_w.t), 0)
         vp_h.move(vl_h.x + 1, 0)
         vp_w.set_width(w - vl_h.x)
+        pp_h.move(vl_h.x, int(ln_h.y + (ln_w.h - 1) * ed.complete_ratio()))
+
+    def on_lineno(ln):
+        ln_w.set_lineno(ln)
 
     def on_message(m, **attrs):
         lb_w.t = [Attrs(c=c, **attrs) for c in m]
-        align_msg()
-
-    def align_msg():
-        lb_h.move(w - len(lb_w.t), 0)
 
     def on_cursor(c):
         vp_w.adjust()
 
     def on_xy(c):
-        pp_h.move(vl_h.x, int(ln_h.y + (ln_w.h - 1) * ed.complete_ratio()))
         ln_w.set_max(c['c'])
 
     class Input(TextInput):
@@ -2079,6 +2077,8 @@ def editor_widget(ed, bus, w, h):
 
     class WWW:
         def pixels(self, attrs):
+            reparent()
+
             return mw_w.pixels(attrs)
 
         def dispatch(self, ev):
