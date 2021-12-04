@@ -410,55 +410,9 @@ class Color24:
     def fg(self):
         return csim(38, 2, *self.t)
 
-    def as_dict(self):
-        return {'t': '2', 'v': self.t}
-
-    def rgb(self):
-        return self.t
-
 
 TBL8BG = [csim(48, 5, n) for n in range(0, 256)]
 TBL8FG = [csim(38, 5, n) for n in range(0, 256)]
-
-
-def iter_4():
-    yield 0, 0, 0
-    yield 170, 0, 0
-    yield 0, 170, 0
-    yield 170, 85, 0
-    yield 0, 0, 170
-    yield 170, 0, 170
-    yield 0, 170, 170
-    yield 170, 170, 170
-    yield 85, 85, 85
-    yield 255, 85, 85
-    yield 85, 255, 85
-    yield 255, 255, 85
-    yield 85, 85, 255
-    yield 255, 85, 255
-    yield 85, 255, 255
-    yield 255, 255, 255
-
-
-def iter_8():
-    yield from iter_4()
-
-    scale = 255.0 / 5.0
-
-    for r in range(0, 6):
-        for g in range(0, 6):
-            for b in range(0, 6):
-                yield int(r * scale), int(g * scale), int(b * scale)
-
-    scale = 255.0 / 23.0
-
-    for i in range(0, 24):
-        x = int(i * scale)
-
-        yield x, x, x
-
-
-RGB8 = list(iter_8())
 
 
 class Color8:
@@ -472,12 +426,6 @@ class Color8:
 
     def fg(self):
         return TBL8FG[self.n]
-
-    def as_dict(self):
-        return {'t': '8', 'n': self.n}
-
-    def rgb(self):
-        return RGB8[self.n]
 
 
 TBL4BG = [csim(40 + n if n < 8 else 92 + n) for n in range(0, 16)]
@@ -496,12 +444,6 @@ class Color4:
 
     def fg(self):
         return TBL4FG[self.n]
-
-    def as_dict(self):
-        return {'t': '4', 'n': self.n}
-
-    def rgb(self):
-        return RGB8[self.n]
 
 
 class DefaultColor:
@@ -551,33 +493,8 @@ class Attrs:
 
         return Attrs(c=c2 or c1, b=b2 or b1, f=f2 or f1)
 
-    def as_dict(self):
-        c, b, f = self.t
-
-        return {'c': c, 'b': b.as_dict(), 'f': f.as_dict()}
-
-
-def color_from_dict(d):
-    t = d['t']
-
-    if t == '4':
-        return Color4(d['n'])
-
-    if t == '8':
-        return Color8(d['n'])
-
-    if t == '2':
-        return Color24(*d['v'])
-
-    if t == 'd':
-        return DefaultColor()
-
-    if t == 'p':
-        return PreparedColor(d['b'], d['f'])
-
-
-def attrs_from_dict(d):
-    return Attrs(c=d['c'], b=color_from_dict(d['b']), f=color_from_dict(d['f']))
+    def char(self):
+        return self.t[0]
 
 
 class ReverseAttrs:
@@ -828,6 +745,23 @@ def guess_lexer(p, d):
         return pl.guess_lexer(d[:10000])
 
 
+def parse_color(c):
+    return Color24(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+
+
+def parse_style(s):
+    r = {}
+
+    if col := s.get('color'):
+        r['f'] = parse_color(col)
+
+    if 0:
+        if col := s.get('bgcolor'):
+            r['b'] = parse_color(col)
+
+    return r
+
+
 class HighLight:
     CALL = re.compile('([a-zA-Z]\w*)\(')
 
@@ -849,56 +783,40 @@ class HighLight:
 
     def __init__(self, p, d):
         self.lex = guess_lexer(p, d)
-        self.stl = ps.get_style_by_name('material')
+        self.stl = ps.get_style_by_name('arduino')
         self.lns = {}
-        self.col = {}
-
-    def parse_color(self, c):
-        while True:
-            try:
-                return self.col[c]
-            except KeyError:
-                self.col[c] = Color24(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+        self.typ = {}
 
     def style(self, typ):
-        try:
-            return self.parse_color(self.stl.style_for_token(typ)['color'])
-        except KeyError:
-            return white()
+        while True:
+            try:
+                return self.typ[typ]
+            except KeyError:
+                self.typ[typ] = parse_style(self.stl.style_for_token(typ))
 
     def style_line_impl(self, l):
         extra = dict(self.iter_calls(l))
 
         for n, (ch, s) in enumerate(self.iter_pygments(l)):
-            yield ch, extra.get(n, s)
+            if ch == '\n':
+                pass
+            else:
+                yield Attrs(c=ch, **self.style(extra.get(n, s)))
 
     def iter_calls(self, l):
-        cc = self.style(pt.Name.Class)
-        cf = self.style(pt.Name.Function)
+        cc = pt.Name.Class
+        cf = pt.Name.Function
 
         for m in re.finditer(self.CALL, l):
             mm = m[1]
 
-            if mm[0].islower():
-                if mm in self.DFLT:
-                    co = cc
-                else:
-                    co = cf
-            else:
-                co = cc
-
             for p in range(m.start(1), m.end(1)):
-                yield p, co
+                yield p, (cc if mm in self.DFLT else cf) if mm[0].islower() else cc
 
     def iter_pygments(self, l):
         for typ, text in self.lex.get_tokens(l):
-            s = self.style(typ)
-
             for ch in text:
-                if ch == '\n':
-                    pass
-                else:
-                    yield ch, s
+                yield ch, typ
 
     def style_line(self, l):
         if len(self.lns) > 10000:
@@ -908,12 +826,7 @@ class HighLight:
             try:
                 return self.lns[l]
             except KeyError:
-                r = list(self.style_line_impl(l))
-
-                if len(r) != len(l):
-                    r = [(c, white()) for c in l]
-
-                self.lns[l] = r
+                self.lns[l] = list(self.style_line_impl(l))
 
 
 def calc_split(d):
@@ -1281,10 +1194,10 @@ class Editor:
             l = self.h.style_line(s)
 
             for x in range(x1, min(x2, len(l))):
-                c, col = l[x]
+                a = l[x]
 
-                if c != ' ':
-                    yield x, y, Attrs(c=c, f=col)
+                if a.char() != ' ':
+                    yield x, y, a
 
         for x, y, c in self.iter_xyc(*self.get_mark()):
             yield x, y, Attrs(c=c, b=gray8(5))
