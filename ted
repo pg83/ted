@@ -749,14 +749,14 @@ def parse_color(c):
     return Color24(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
 
 
-def parse_style(s):
+def parse_style(s, defbg):
     r = {}
 
     if col := s.get('color'):
         r['f'] = parse_color(col)
 
-    if 0:
-        if col := s.get('bgcolor'):
+    if col := s.get('bgcolor'):
+        if col != defbg:
             r['b'] = parse_color(col)
 
     return r
@@ -784,6 +784,7 @@ class HighLight:
     def __init__(self, p, d):
         self.lex = guess_lexer(p, d)
         self.stl = ps.get_style_by_name('arduino')
+        self.dbg = self.stl.background_color
         self.lns = {}
         self.typ = {}
 
@@ -792,7 +793,7 @@ class HighLight:
             try:
                 return self.typ[typ]
             except KeyError:
-                self.typ[typ] = parse_style(self.stl.style_for_token(typ))
+                self.typ[typ] = parse_style(self.stl.style_for_token(typ), self.dbg)
 
     def style_line_impl(self, l):
         extra = dict(self.iter_calls(l))
