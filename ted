@@ -745,19 +745,6 @@ def parse_color(c):
     return Color24(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
 
 
-def parse_style(s, defbg):
-    r = {}
-
-    if col := s.get('color'):
-        r['f'] = parse_color(col)
-
-    if col := s.get('bgcolor'):
-        if col != defbg:
-            r['b'] = parse_color(col)
-
-    return r
-
-
 class HighLight:
     CALL = re.compile('([a-zA-Z]\w*)\(')
 
@@ -784,12 +771,30 @@ class HighLight:
         self.lns = {}
         self.typ = {}
 
+    def parse_style(self, typ):
+        s = self.stl.style_for_token(typ)
+        r = {}
+
+        if col := s.get('color'):
+            r['f'] = parse_color(col)
+
+        if col := s.get('bgcolor'):
+            if col != self.dbg:
+                r['b'] = parse_color(col)
+
+        if 'string' in str(typ).lower():
+            cr, cg, cb = r['f'].t
+
+            r['b'] = Color24(cr // 8, cg // 8, cb // 8)
+
+        return r
+
     def style(self, typ):
         while True:
             try:
                 return self.typ[typ]
             except KeyError:
-                self.typ[typ] = parse_style(self.stl.style_for_token(typ), self.dbg)
+                self.typ[typ] = self.parse_style(typ)
 
     def style_line_impl(self, l):
         extra = dict(self.iter_calls(l))
@@ -1672,9 +1677,6 @@ class VLine:
         self.h = h
 
     def pixels(self, attrs):
-        #yield 0, 0, Attrs(c=chr(0x252C))
-        #yield 0, self.h - 1, Attrs(c=chr(0x2534))
-
         a = Attrs(c=chr(0x2502))
 
         for y in range(0, self.h):
@@ -1953,9 +1955,9 @@ def editor_widget(ed, bus, w, h):
     ln_h = st_w.push(ln_w)
     vl_h = st_w.push(vl_w)
     lb_h = st_w.push(lb_w)
-    cp_h = st_w.push(cp_w)
     pp_h = st_w.push(pp_w)
     vp_h = st_w.push(vp_w)
+    cp_h = st_w.push(cp_w)
     cf_h = st_w.push(cf_w)
 
     def on_lineno(ln):
