@@ -57,8 +57,11 @@ class PubSub:
         self.pub('message', m, **kwargs)
 
 
+ESC = chr(27)
+
+
 def esc(d):
-    return chr(27) + d
+    return f'{ESC}{d}'
 
 
 def csi(*args):
@@ -76,7 +79,7 @@ def csim(*args):
 
 
 def title(t):
-    return chr(27) + ']0;' + t + chr(7)
+    return ESC + ']0;' + t + chr(7)
 
 
 def move(x, y):
@@ -550,7 +553,8 @@ class Display:
         self.ch.title(t)
 
     def flip(self, pixels):
-        ds = ''
+        ds = f'{ESC}P=1s{ESC}\\{ESC}[?2026h'
+
         dd = self.dd
         bp = {}
         dx = self.dx
@@ -583,6 +587,8 @@ class Display:
 
                 p = k
                 ds += f
+
+        ds += f'{ESC}[?2026l{ESC}P=2s{ESC}\\'
 
         schedule(lambda: self.ch.send(ds))
 
