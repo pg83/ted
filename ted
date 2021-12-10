@@ -2196,10 +2196,7 @@ class Main:
     def __init__(self, path):
         pr = os.path.expanduser('~/.config/ted')
 
-        try:
-            os.makedirs(pr)
-        except OSError:
-            pass
+        os.makedirs(pr, exist_ok=True)
 
         cf = load_config(os.path.join(pr, 'ted.json'))
         fn = os.path.normpath(os.path.abspath(path))
