@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
+import sys
+import traceback
+
+sys.excepthook = traceback.print_exception
+
 import re
 import io
 import os
-import sys
 import json
 import time
 import math
@@ -896,7 +900,10 @@ class TextArray:
         return bisect.bisect_left(self.p, pos)
 
     def line_start(self, y):
-        return 0 if y == 0 else self.p[y - 1] + 1
+        try:
+            return self.p[y - 1] + 1
+        except IndexError:
+            return 0
 
     def iter_chars_fwd(self, fr):
         return map(self.d.__getitem__, itt.count(fr))
