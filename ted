@@ -1727,7 +1727,9 @@ class LineNo:
 
     @property
     def width(self):
-        return len(str(self.f))
+        f = self.f
+
+        return len(str(f)) if f else 0
 
     def pixels(self, attrs):
         f = gray8(8)
@@ -1739,7 +1741,7 @@ class LineNo:
         w = self.width
 
         for y, s in enumerate(range(self.s, self.f)):
-            l = str(s)
+            l = str(s + 1)
             dx = w - len(l)
 
             for x, c in enumerate(l):
