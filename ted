@@ -1126,9 +1126,13 @@ class Editor:
 
     def save(self, p):
         t = p + '.tmp'
+        r = self.t.result()
+
+        if p.endswith('.go'):
+            r = r.replace('    ', '\t')
 
         with open(t, 'w') as f:
-            f.write(self.t.result())
+            f.write(r)
 
         os.chmod(t, self.st_mode)
         os.rename(t, p)
