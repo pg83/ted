@@ -22,6 +22,7 @@ import fractions
 import threading
 import functools
 import contextlib
+import subprocess
 
 import itertools as itt
 
@@ -1073,6 +1074,46 @@ def split_lines(it):
         yield l
 
 
+def it_trailing_tabs(l):
+    while l.startswith('    '):
+        yield '\t'
+        l = l[4:]
+
+    yield l
+
+
+def fix_trailing_tabs(l):
+    return ''.join(it_trailing_tabs(l))
+
+
+def restore_tabs(data):
+    def it():
+        for l in data.split('\n'):
+            yield fix_trailing_tabs(l)
+
+    return '\n'.join(it()).strip() + '\n'
+
+
+def reformat_go(data):
+    try:
+        cp = subprocess.run(['gofmt'], input=data.encode(), check=True, capture_output=True)
+
+        return cp.stdout.decode()
+    except FileNotFoundError:
+        pass
+    except subprocess.CalledProcessErro:
+        pass
+
+    return restore_tabs(data)
+
+
+def reformat(data, path):
+    if path.endswith('.go'):
+        return reformat_go(data)
+
+    return data
+
+
 class Editor:
     BRKT = dict(gen_brackets())
 
@@ -1126,13 +1167,9 @@ class Editor:
 
     def save(self, p):
         t = p + '.tmp'
-        r = self.t.result()
-
-        if p.endswith('.go'):
-            r = r.replace('    ', '\t')
 
         with open(t, 'w') as f:
-            f.write(r)
+            f.write(reformat(self.t.result(), p))
 
         os.chmod(t, self.st_mode)
         os.rename(t, p)
