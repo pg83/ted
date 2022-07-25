@@ -1101,7 +1101,7 @@ def reformat_go(data):
         return cp.stdout.decode()
     except FileNotFoundError:
         pass
-    except subprocess.CalledProcessErro:
+    except subprocess.CalledProcessError:
         pass
 
     return restore_tabs(data)
