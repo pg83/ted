@@ -12,6 +12,7 @@ import json
 import time
 import math
 import queue
+import shutil
 import bisect
 import string
 import signal
@@ -121,7 +122,11 @@ class Channel:
 
     def fini(self):
         os.system('stty echo -raw')
-        os.system('tput reset')
+
+        if shutil.which('tput'):
+            os.system('tput reset')
+        else:
+            os.system('reset')
 
     def title(self, t):
         self.send(title(t))
