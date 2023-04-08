@@ -2006,7 +2006,6 @@ def editor_widget(ed, bus, w, h):
     st_w.push_raw(Panel(w, h, Attrs(c=' ', b=DefaultColor(), f=white())))
 
     cb_w = CursorB()
-    vl_w = VLine(h)
     lb_w = ColorLabel()
     cp_w = HGrad(w)
     pp_w = Panel(1, 1, Attrs(b=gray8(14)))
@@ -2022,9 +2021,25 @@ def editor_widget(ed, bus, w, h):
 
     ln_w = EditorLineNo(0, h)
 
+    def vl_x():
+        return ln_h.x + ln_w.width
+
+    class BG:
+        def pixels(self, attrs):
+            a = Attrs(b=gray24(8))
+            w = self.width
+
+            for y in range(0, h):
+                for x in range(0, w):
+                    yield x, y, a
+
+        @property
+        def width(self):
+            return vl_x() + 1
+
+    bg_h = st_w.push(BG())
     cb_h = st_w.push(cb_w)
     ln_h = st_w.push(ln_w)
-    vl_h = st_w.push(vl_w)
     pp_h = st_w.push(pp_w)
     vp_h = st_w.push(vp_w)
     cp_h = st_w.push(cp_w)
@@ -2035,11 +2050,10 @@ def editor_widget(ed, bus, w, h):
         ln_h.move(0, 0)
         ln_w.set_max(ed.t.line_count())
         ln_w.set_lineno(int(vp_w.y))
-        vl_h.move(ln_h.x + ln_w.width, 0)
         lb_h.move(w - len(lb_w.t), 0)
-        vp_h.move(vl_h.x + 1, 0)
+        vp_h.move(vl_x() + 1, 0)
         vp_w.set_width(w - vp_h.x)
-        pp_h.move(vl_h.x, int(ln_h.y + (ln_w.h - 1) * ed.complete_ratio()))
+        pp_h.move(vl_x(), int(ln_h.y + (ln_w.h - 1) * ed.complete_ratio()))
         vp_w.adjust()
 
     def on_message(m, **attrs):
@@ -2051,7 +2065,7 @@ def editor_widget(ed, bus, w, h):
             mw_w.pop()
 
     def add_dialog(d):
-        return mw_w.push(BackGround(d)).move(vl_h.x + 2, h - 1).w.w
+        return mw_w.push(BackGround(d)).move(vl_x() + 2, h - 1).w.w
 
     def on_show_search_dialog():
         msg('search')
